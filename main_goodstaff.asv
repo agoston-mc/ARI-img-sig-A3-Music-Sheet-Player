@@ -1,0 +1,456 @@
+function [template_results, staff_lines] = find_multiple_templates(image_path, template_paths, varargin)
+    % Parse optional input arguments
+    p = inputParser;
+    addParameter(p, 'Threshold', 0.7, @isnumeric);
+    addParameter(p, 'MinSeparation', 50, @isnumeric);
+    parse(p, varargin{:});
+    
+    % Extract parameters
+    threshold = p.Results.Threshold;
+    min_separation = p.Results.MinSeparation;
+    
+    % Read the main image
+    main_image = imread(image_path);
+    
+    % Convert main image to grayscale if needed
+    if size(main_image, 3) > 1
+        main_gray = rgb2gray(main_image);
+    else
+        main_gray = main_image;
+    end
+    
+    % Detect horizontal lines (staff lines)
+    staff_lines = detect_staff_lines(main_gray);
+    
+    % Initialize results structure with additional category field
+    template_results = struct(...
+        'type', {}, ...
+        'vertical_position', {}, ...
+        'bounding_box', {}, ...
+        'correlation_value', {}, ...
+        'line_category', {});
+
+    
+    % Debug figure for visualization
+    figure('Position', [100, 100, 1200, 800]);
+    imshow(main_image);
+    hold on;
+    
+    % Color map for bounding boxes and lines
+    colors = {
+        [1 0 0], ... Red
+        [0 1 0], ... Green
+        [0 0 1], ... Blue
+        [1 1 0], ... Yellow
+        [0 1 1], ... Cyan
+        [1 0 1]  ... Magenta
+    };
+    
+    % Mask to track used regions of the image
+    used_regions_mask = false(size(main_gray));
+    
+
+    % Iterate through each template
+    for i = 1:length(template_paths)
+        % Read template
+        template = imread(template_paths{i});
+        
+        % Convert template to grayscale if needed
+        if size(template, 3) > 1
+            template_gray = rgb2gray(template);
+        else
+            template_gray = template;
+        end
+        
+        % Perform template matching
+        correlation = normxcorr2(template_gray, main_gray);
+        
+        % Find multiple correlation peaks
+        [height, width] = size(main_gray);
+        [template_height, template_width] = size(template_gray);
+        
+        % Identify multiple correlation peaks
+        peak_locations = [];
+        while true
+            % Find maximum correlation value
+            [max_corr, max_idx] = max(correlation(:));
+            
+            % If correlation is below threshold, stop searching
+            if max_corr < threshold
+                break;
+            end
+            
+            % Convert linear index to 2D coordinates
+            [y, x] = ind2sub(size(correlation), max_idx);
+            
+            % Adjust coordinates to image space
+            adj_y = y - template_height + 1;
+            adj_x = x - template_width + 1;
+            
+            % Create bounding box
+            % bbox = [adj_x, adj_y, template_width, template_height];
+            
+            % Check for overlap with used regions
+            bbox_mask = false(size(main_gray));
+            bbox_mask(max(1, adj_y):min(height, adj_y+template_height-1), ...
+                      max(1, adj_x):min(width, adj_x+template_width-1)) = true;
+            
+            % Check if this match overlaps with existing regions
+            if ~any(used_regions_mask(bbox_mask))
+                % Update used regions mask
+                used_regions_mask(bbox_mask) = true;
+                
+                % Store match details
+                peak_locations(end+1, :) = [adj_y, adj_x, max_corr];
+            end
+            
+            % Zero out the neighborhood of the current peak to find next matches
+            y_range = max(1, y-template_height):min(size(correlation, 1), y+template_height);
+            x_range = max(1, x-template_width):min(size(correlation, 2), x+template_width);
+            correlation(y_range, x_range) = 0;
+        end
+        
+        % Add found matches to results
+        for j = 1:size(peak_locations, 1)
+            % Determine line category
+            line_category = categorize_vertical_position(peak_locations(j, 1), staff_lines);
+            
+            % Create bounding box
+            bbox = [peak_locations(j, 2), peak_locations(j, 1), template_width, template_height];
+            
+            % Create result struct
+            current_result = struct(...
+                'type', template_paths{i}(1:end-4), ...
+                'vertical_position', peak_locations(j, 1), ...
+                'bounding_box', {bbox}, ...
+                'correlation_value', peak_locations(j, 3), ...
+                'line_category', line_category);
+            
+            % Add to results
+            if isempty(template_results)
+                template_results = current_result;
+            else
+                template_results(end+1) = current_result;
+            end
+
+            % Draw bounding box
+            color = colors{mod(i-1, length(colors))+1};
+            rectangle('Position', bbox, 'EdgeColor', color, 'LineWidth', 2, 'LineStyle', '--');
+            text(bbox(1), bbox(2)-10, sprintf('%.2f', peak_locations(j, 3)), 'Color', color, 'FontSize', 10);
+        end
+    end
+
+    % Sort results by horizontal position (from left to right)
+    if ~isempty(template_results)
+        % Extract x-coordinates (first element of bounding box)
+        x_coords = cellfun(@(x) x(1), {template_results.bounding_box});
+        
+        % Sort by x-coordinates
+        [~, idx] = sort(x_coords);
+        template_results = template_results(idx);
+    end
+
+    % Draw detected staff lines
+    for k = 1:length(staff_lines)
+        line(xlim, [staff_lines(k), staff_lines(k)], 'Color', 'red', 'LineStyle', '--', 'LineWidth', 1);
+    end
+    
+    % Save debug image
+    title('Template Matching Results (With Staff Lines)');
+    saveas(gcf, 'template_matching_debug.png');
+    
+    % Display results
+    disp('Found Templates:');
+    for i = 1:length(template_results)
+        fprintf('Template %d:\n', i);
+        fprintf('  Type: %s\n', template_results(i).type);
+        fprintf('  Vertical Position: %d\n', template_results(i).vertical_position);
+        fprintf('  Bounding Box: [%d, %d, %d, %d]\n', ...
+            template_results(i).bounding_box(1), ...
+            template_results(i).bounding_box(2), ...
+            template_results(i).bounding_box(3), ...
+            template_results(i).bounding_box(4));
+        fprintf('  Correlation Value: %.4f\n', template_results(i).correlation_value);
+        fprintf('  Line Category: %s\n\n', template_results(i).line_category);
+    end
+end
+
+% Helper function to detect staff lines
+function staff_lines = detect_staff_lines(image_gray)
+    % Preprocess the image
+    % Increase contrast
+    image_adjusted = imadjust(image_gray);
+
+    % Apply threshold to create binary image
+    threshold = graythresh(image_adjusted);
+    binary_image = imbinarize(image_adjusted, threshold);
+
+    % Invert binary image (assuming staff lines are dark)
+    binary_image = ~binary_image;
+
+    % Use morphological operations to enhance horizontal lines
+    se_horizontal = strel('line', 50, 0);  % Horizontal structuring element
+    horizontal_lines = imopen(binary_image, se_horizontal);
+
+    % Compute vertical projection of the binary image
+    vertical_projection = sum(horizontal_lines, 2);
+
+    % Find peaks in the vertical projection
+    [pks, locs] = findpeaks(vertical_projection, ...
+        'MinPeakHeight', max(vertical_projection) * 0.5, ...  % Adjust height threshold
+        'MinPeakDistance', 10);  % Minimum distance between peaks
+
+    % If not enough peaks found, try adjusting parameters
+    if length(locs) < 4
+        [pks, locs] = findpeaks(vertical_projection, ...
+            'MinPeakHeight', max(vertical_projection) * 0.3, ...  % Lower height threshold
+            'MinPeakDistance', 5);  % Smaller minimum distance
+    end
+
+    % Sort and select top 4 peaks
+    if length(locs) >= 4
+        % Sort peaks and select top 4
+        [sorted_locs, idx] = sort(locs);
+        staff_lines = sorted_locs(max(1, end-3):end);
+    else
+        % Fallback method if peaks not found reliably
+        staff_line_spacing = round(mean(diff(locs)));
+        base_line = locs(1);
+        staff_lines = base_line + staff_line_spacing * (0:3);
+    end
+
+    % Ensure exactly 4 lines are returned and sorted
+    if length(staff_lines) > 4
+        staff_lines = staff_lines(end-3:end);
+    elseif length(staff_lines) < 4
+        error('Could not detect 4 staff lines');
+    end
+
+    % Sort the lines
+    staff_lines = sort(staff_lines);
+end
+
+function category = categorize_vertical_position(y_pos, staff_lines)
+    % Ensure staff lines are sorted
+    staff_lines = sort(staff_lines);
+
+    % Define categories based on staff lines
+    categories = {
+        'space_0', ...
+        'line_1', ...
+        'space_1', ...
+        'line_2', ...
+        'space_2', ...
+        'line_3', ...
+        'space_3', ...
+        'line_4', ...
+        'space_4'
+    };
+
+    % Check position relative to staff lines with 8-pixel proximity
+    proximity_threshold = 8;
+
+    if y_pos < staff_lines(1) - proximity_threshold
+        category = categories{1};  % highest space
+    elseif y_pos >= staff_lines(1) - proximity_threshold && y_pos < staff_lines(1) % within 2 pixels of first line
+        category = categories{2};  % first line
+    elseif  y_pos > staff_lines(1) && y_pos < staff_lines(2) - proximity_threshold
+        category = categories{3};  % space below first line
+    elseif y_pos >= staff_lines(2) - proximity_threshold && y_pos < staff_lines(2) % within 2 pixels of second line
+        category = categories{4};  % second line
+    elseif y_pos > staff_lines(2) && y_pos < staff_lines(3) - proximity_threshold
+        category = categories{5};  % space below second line
+    elseif y_pos >= staff_lines(3) - proximity_threshold && y_pos < staff_lines(3) % within 2 pixels of third line
+        category = categories{6};  % third line
+    elseif y_pos > staff_lines(3) && y_pos < staff_lines(4) - proximity_threshold
+        category = categories{7};  % space below third line
+    elseif y_pos >= staff_lines(4) - proximity_threshold && y_pos < staff_lines(4) % within 2 pixels of fourth line
+        category = categories{8};  % fourth line
+    else
+        category = categories{9};  % space below fourth line
+    end
+end
+
+% function to generate musical note, length list from the results
+function musical_notes = generate_musical_notes(template_results)
+    musical_notes = struct(...
+        'sign', {}, ...
+        'type', {}, ...
+        'length', {});
+
+    % get clef position
+    clef = template_results(1);
+
+    categories = {
+        'space_0', ...
+        'line_1', ...
+        'space_1', ...
+        'line_2', ...
+        'space_2', ...
+        'line_3', ...
+        'space_3', ...
+        'line_4', ...
+        'space_4'
+    };
+
+    % clef category
+    clef_category = clef.line_category;
+
+    % get the position of the clef for offsetting to C
+    clef_position = find(strcmp(categories, clef_category)) + 2;
+
+    note_signs = { 'B', 'A', 'G', 'F', 'E', 'D', 'C' };
+
+    % get the position of the notes
+    for i = 2:length(template_results)
+        % if it's a mora, we can skip it
+        if strcmp(template_results(i).type, 'mora')
+            continue;
+        end
+
+        note = template_results(i);
+        note_category = note.line_category;
+        note_position = find(strcmp(categories, note_category));
+
+        % calculate the note position relative to C
+        note_position = note_position - clef_position;
+
+        % calculate the note sign
+        note_sign = note_signs{mod(note_position, 7) + 1};
+
+        % calculate the note length (if next is 'mora' then length is 2, else 1)
+        note_length = 1;
+        if i < length(template_results) && strcmp(template_results(i+1).type, 'mora')
+            note_length = 2;
+        end
+
+        % store the note sign and length at the next index
+        musical_notes(end+1) = struct(...
+            'sign', note_sign, ...
+            'type', note.type, ...
+            'length', note_length);
+
+    end
+
+    % display the musical notes
+    disp('Musical Notes:');
+    for i = 1:length(musical_notes)
+        fprintf('Note %d:\n', i);
+        fprintf('  Sign: %s\n', musical_notes(i).sign);
+        fprintf('  Type: %s\n\n', musical_notes(i).type);
+        fprintf('  Length: %d\n\n', musical_notes(i).length);
+    end
+
+end
+
+
+function play_musical_notes(musical_notes)
+    % Play musical notes based on their sign, type, and length
+    
+    % Sample parameters
+    sample_rate = 44100;  % Standard audio sample rate
+    base_duration = 1;  % Base note duration in seconds
+    
+    % Frequency mapping for notes (in Hz)
+    % Adjusted to match the note signs from the generate_musical_notes function
+    note_frequencies = containers.Map({
+        'C', 'D', 'E', 'F', 'G', 'A', 'B'
+    }, {
+        261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88
+    });
+    
+    % Initialize audio signal
+    audio_signal = [];
+    
+    % Process each note
+    for i = 1:length(musical_notes)
+        % Skip empty notes
+        if isempty(musical_notes(i).sign)
+            continue;
+        end
+        
+        % Get note frequency
+        try
+            freq = note_frequencies(musical_notes(i).sign);
+        catch
+            warning('Unknown note: %s. Skipping.', musical_notes(i).sign);
+            continue;
+        end
+        
+        % Determine note duration based on length
+        duration = base_duration * musical_notes(i).length;
+        
+        % Generate tone
+        t = linspace(0, duration, round(duration * sample_rate));
+        
+        % Determine tone type
+        switch musical_notes(i).type
+            case 'punctum'
+                % Simple sine wave
+                tone = sin(2 * pi * freq * t);
+            case 'clivis'
+                % Descending tone (slightly different amplitude)
+                tone = 0.8 * sin(2 * pi * freq * t) .* linspace(1, 0.5, length(t));
+            case 'podatus'
+                % Ascending tone (slightly different amplitude)
+                tone = 0.8 * sin(2 * pi * freq * t) .* linspace(0.5, 1, length(t));
+            case {'mora', 'c_clef'}
+                % Soft tone or no tone for these types
+                tone = 0.3 * sin(2 * pi * freq * t);
+            otherwise
+                % Default to simple sine wave
+                tone = sin(2 * pi * freq * t);
+        end
+        
+        % Apply simple envelope to prevent clicking
+        % Create envelope with rounded lengths
+        attack_length = round(0.05 * length(tone));
+        sustain_length = round(0.7 * length(tone));
+        release_length = round(0.25 * length(tone));
+        
+        envelope = ones(size(tone));  % Matches tone size exactly
+
+        % Create attack phase (first 5% of tone)
+        attack_length = round(0.05 * length(tone));
+        envelope(1:attack_length) = linspace(0, 1, attack_length);
+
+        % Create release phase (last 25% of tone)
+        release_length = round(0.25 * length(tone));
+        envelope(end-release_length+1:end) = linspace(1, 0, release_length);
+
+        % Now multiply is guaranteed to work
+        tone = tone .* envelope;
+        
+        % Append to audio signal
+        audio_signal = [audio_signal, tone];
+    end
+    
+    % Normalize audio to prevent clipping
+    audio_signal = audio_signal / max(abs(audio_signal));
+    
+    % Play the audio
+    sound(audio_signal, sample_rate);
+    
+    % Optional: Save to WAV file
+    audiowrite('musical_notes_output.wav', audio_signal, sample_rate);
+    
+    % Display playback information
+    fprintf('Playing %d notes. Total duration: %.2f seconds\n', ...
+        length(musical_notes), length(audio_signal)/sample_rate);
+end
+
+
+clear
+clc
+
+image_path = 'sheet_0.jpg';
+template_paths = {'c_clef_template.png', 'clivis.png', 'podatus.png', 'punctum.png', 'mora.png'};
+[results, staff_lines] = find_multiple_templates(image_path, template_paths);
+
+% Display staff lines
+disp('Detected Staff Lines:');
+disp(staff_lines);
+
+musical_notes = generate_musical_notes(results);
+
+play_musical_notes(musical_notes)
